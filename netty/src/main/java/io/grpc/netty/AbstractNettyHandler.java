@@ -30,12 +30,15 @@ import io.netty.handler.codec.http2.Http2LocalFlowController;
 import io.netty.handler.codec.http2.Http2Settings;
 import io.netty.handler.codec.http2.Http2Stream;
 import java.util.concurrent.TimeUnit;
+import java.util.logging.Logger;
 
 /**
  * Base class for all Netty gRPC handlers. This class standardizes exception handling (always
  * shutdown the connection) as well as sending the initial connection window at startup.
  */
 abstract class AbstractNettyHandler extends GrpcHttp2ConnectionHandler {
+  private static final Logger logger = Logger.getLogger(AbstractNettyHandler.class.getName());
+
   private static final long GRACEFUL_SHUTDOWN_NO_TIMEOUT = -1;
 
   private final int initialConnectionWindow;
@@ -173,7 +176,9 @@ abstract class AbstractNettyHandler extends GrpcHttp2ConnectionHandler {
       if (elapsedTime == 0) {
         elapsedTime = 1;
       }
+      logger.info("Time millis since ping: " + elapsedTime / 1_000_000.0);
       long bandwidth = (getDataSincePing() * TimeUnit.SECONDS.toNanos(1)) / elapsedTime;
+      logger.info("Data since ping: " + bandwidth);
       Http2LocalFlowController fc = decoder().flowController();
       // Calculate new window size by doubling the observed BDP, but cap at max window
       int targetWindow = Math.min(getDataSincePing() * 2, MAX_WINDOW_SIZE);
@@ -200,6 +205,7 @@ abstract class AbstractNettyHandler extends GrpcHttp2ConnectionHandler {
 
     private void sendPing(ChannelHandlerContext ctx) {
       setDataSizeSincePing(0);
+      logger.info("Send ping");
       lastPingTime = System.nanoTime();
       encoder().writePing(ctx, false, BDP_MEASUREMENT_PING, ctx.newPromise());
       pingCount++;

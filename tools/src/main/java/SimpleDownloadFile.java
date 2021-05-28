@@ -9,9 +9,14 @@ import io.grpc.netty.NettyChannelBuilder;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.Iterator;
+import java.util.logging.Logger;
 
 public class SimpleDownloadFile {
+    private static final Logger logger = Logger.getLogger(SimpleDownloadFile.class.getName());
+
     public static void main(String[] args) throws Exception{
+        System.setProperty("java.util.logging.SimpleFormatter.format", "%1$tl:%1$tM:%1$tS.%1$tL %4$s: %5$s%6$s%n");
+
         if (args.length < 2) {
             throw new IllegalArgumentException("specify target & digest+size");
         }
@@ -35,6 +40,6 @@ public class SimpleDownloadFile {
             responses.next();
         }
         Duration elapsed = Duration.between(start, LocalDateTime.now());
-        System.out.println("Finished downloading file in " + elapsed);
+        logger.info("Finished downloading file in " + elapsed);
     }
 }
