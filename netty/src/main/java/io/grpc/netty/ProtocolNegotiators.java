@@ -16,9 +16,6 @@
 
 package io.grpc.netty;
 
-import static com.google.common.base.Preconditions.checkNotNull;
-import static com.google.common.base.Preconditions.checkState;
-
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.errorprone.annotations.ForOverride;
@@ -33,6 +30,7 @@ import io.grpc.Status;
 import io.grpc.internal.GrpcAttributes;
 import io.grpc.internal.GrpcUtil;
 import io.grpc.internal.ObjectPool;
+import io.netty.buffer.ByteBufUtil;
 import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandler;
@@ -52,21 +50,35 @@ import io.netty.handler.ssl.OpenSslEngine;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.ssl.SslHandshakeCompletionEvent;
+import io.netty.handler.ssl.SslMasterKeyHandler;
 import io.netty.handler.ssl.SslProvider;
 import io.netty.util.AsciiString;
 import io.netty.util.Attribute;
 import io.netty.util.AttributeMap;
+
+import javax.annotation.Nullable;
+import javax.crypto.SecretKey;
+import javax.net.ssl.SSLEngine;
+import javax.net.ssl.SSLParameters;
+import javax.net.ssl.SSLSession;
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.FileWriter;
+import java.io.OutputStream;
+import java.io.OutputStreamWriter;
+import java.io.PrintWriter;
 import java.net.SocketAddress;
 import java.net.URI;
 import java.nio.channels.ClosedChannelException;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.concurrent.Executor;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-import javax.annotation.Nullable;
-import javax.net.ssl.SSLEngine;
-import javax.net.ssl.SSLParameters;
-import javax.net.ssl.SSLSession;
+
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 
 /**
  * Common {@link ProtocolNegotiator}s used by gRPC.
@@ -328,6 +340,7 @@ final class ProtocolNegotiators {
   }
 
   static final class ClientTlsHandler extends ProtocolNegotiationHandler {
+    private static WiresharkSslMasterKeyHandler wiresharkSslMasterKeyHandler;
 
     private final SslContext sslContext;
     private final String host;
@@ -344,6 +357,13 @@ final class ProtocolNegotiators {
       this.executor = executor;
     }
 
+    private synchronized WiresharkSslMasterKeyHandler getWiresharkSslMasterKeyHandler(String secretsFile) {
+      if (wiresharkSslMasterKeyHandler == null) {
+        wiresharkSslMasterKeyHandler = new WiresharkSslMasterKeyHandler(secretsFile);
+      }
+      return wiresharkSslMasterKeyHandler;
+    }
+
     @Override
     protected void handlerAdded0(ChannelHandlerContext ctx) {
       SSLEngine sslEngine = sslContext.newEngine(ctx.alloc(), host, port);
@@ -353,6 +373,38 @@ final class ProtocolNegotiators {
       ctx.pipeline().addBefore(ctx.name(), /* name= */ null, this.executor != null
           ? new SslHandler(sslEngine, false, this.executor)
           : new SslHandler(sslEngine, false));
+
+      String secretsFile = System.getProperty("bazel.tlsSecretsFile");
+      if (secretsFile != null) {
+        ctx.pipeline().addBefore(ctx.name(), null, getWiresharkSslMasterKeyHandler(secretsFile));
+      }
+    }
+
+    @Sharable
+    private static final class WiresharkSslMasterKeyHandler extends SslMasterKeyHandler {
+      private final PrintWriter writer;
+
+      public WiresharkSslMasterKeyHandler(String secretsFile) {
+        OutputStream os;
+        try {
+          os = new FileOutputStream(secretsFile);
+        } catch (FileNotFoundException e) {
+          throw new RuntimeException(e);
+        }
+        writer = new PrintWriter(new OutputStreamWriter(os, StandardCharsets.UTF_8));
+      }
+
+      @Override
+      protected synchronized void accept(SecretKey masterKey, SSLSession session) {
+        if (masterKey.getEncoded().length != 48) {
+          throw new IllegalArgumentException("An invalid length master key was provided.");
+        }
+        final byte[] sessionId = session.getId();
+        writer.printf("RSA Session-ID:%s Master-Key:%s\n",
+                ByteBufUtil.hexDump(sessionId).toLowerCase(),
+                ByteBufUtil.hexDump(masterKey.getEncoded()).toLowerCase());
+        writer.flush();
+      }
     }
 
     @Override
