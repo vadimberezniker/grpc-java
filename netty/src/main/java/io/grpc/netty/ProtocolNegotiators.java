@@ -44,6 +44,7 @@ import io.grpc.TlsServerCredentials;
 import io.grpc.internal.GrpcAttributes;
 import io.grpc.internal.GrpcUtil;
 import io.grpc.internal.ObjectPool;
+import io.netty.buffer.ByteBufUtil;
 import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandler;
@@ -64,12 +65,19 @@ import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.ssl.SslHandshakeCompletionEvent;
+import io.netty.handler.ssl.SslMasterKeyHandler;
 import io.netty.handler.ssl.SslProvider;
 import io.netty.util.AsciiString;
 import java.io.ByteArrayInputStream;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.OutputStream;
+import java.io.OutputStreamWriter;
+import java.io.PrintWriter;
 import java.net.SocketAddress;
 import java.net.URI;
 import java.nio.channels.ClosedChannelException;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.Set;
@@ -77,6 +85,7 @@ import java.util.concurrent.Executor;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import javax.annotation.Nullable;
+import javax.crypto.SecretKey;
 import javax.net.ssl.SSLEngine;
 import javax.net.ssl.SSLException;
 import javax.net.ssl.SSLParameters;
@@ -578,7 +587,7 @@ final class ProtocolNegotiators {
   }
 
   static final class ClientTlsHandler extends ProtocolNegotiationHandler {
-
+    private static WiresharkSslMasterKeyHandler wiresharkSslMasterKeyHandler;
     private final SslContext sslContext;
     private final String host;
     private final int port;
@@ -603,7 +612,48 @@ final class ProtocolNegotiators {
       ctx.pipeline().addBefore(ctx.name(), /* name= */ null, this.executor != null
           ? new SslHandler(sslEngine, false, this.executor)
           : new SslHandler(sslEngine, false));
+
+      String secretsFile = System.getProperty("io.grpc.netty.tlsSecretsFile");
+      if (secretsFile != null) {
+        ctx.pipeline().addBefore(ctx.name(), null, getWiresharkSslMasterKeyHandler(secretsFile));
+      }
     }
+
+    private synchronized WiresharkSslMasterKeyHandler getWiresharkSslMasterKeyHandler(
+            String secretsFile) {
+      if (wiresharkSslMasterKeyHandler == null) {
+        wiresharkSslMasterKeyHandler = new WiresharkSslMasterKeyHandler(secretsFile);
+      }
+      return wiresharkSslMasterKeyHandler;
+    }
+
+    @Sharable
+    private static final class WiresharkSslMasterKeyHandler extends SslMasterKeyHandler {
+      private final PrintWriter writer;
+
+      public WiresharkSslMasterKeyHandler(String secretsFile) {
+        OutputStream os;
+        try {
+          os = new FileOutputStream(secretsFile);
+        } catch (FileNotFoundException e) {
+          throw new RuntimeException(e);
+        }
+        writer = new PrintWriter(new OutputStreamWriter(os, StandardCharsets.UTF_8));
+      }
+
+      @Override
+      protected synchronized void accept(SecretKey masterKey, SSLSession session) {
+        if (masterKey.getEncoded().length != 48) {
+          throw new IllegalArgumentException("An invalid length master key was provided.");
+        }
+        final byte[] sessionId = session.getId();
+        writer.printf("RSA Session-ID:%s Master-Key:%s\n",
+                ByteBufUtil.hexDump(sessionId).toLowerCase(),
+                ByteBufUtil.hexDump(masterKey.getEncoded()).toLowerCase());
+        writer.flush();
+      }
+    }
+
 
     @Override
     protected void userEventTriggered0(ChannelHandlerContext ctx, Object evt) throws Exception {
